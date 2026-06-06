@@ -44,10 +44,16 @@ The sources of the metrics collected and estimated by WattSeal for every sensor 
    * Source: NVIDIA Management Library (NVML).
    * Metrics: Direct power usage in milliwatts (mW) (should switch to energy), GPU utilization, and Memory (VRAM) utilization.
 
-  AMD (Windows only)
+  AMD (Windows)
    * Library: adlx.
    * Source: AMD Display Library X (ADLX).
    * Metrics: Accesses the "Performance Monitoring Services" to retrieve real-time power (mW) and usage statistics.
+
+  AMD (Linux)
+   * Library: Standard file system access.
+   * Source: Open Linux DRM/amdgpu sysfs and hwmon files under `/sys/class/drm/card*/device`.
+   * Metrics: Reads `gpu_busy_percent`, `mem_info_vram_used`, `mem_info_vram_total`, and amdgpu `hwmon` power files (`power1_average` or `power1_input`) when the kernel exposes them.
+   * RDNA 4 note: Known RADV/GFX12 device IDs are labeled as Navi 44/GFX1200 or Navi 48/GFX1201 when detected; unknown AMD IDs still use the same open amdgpu telemetry path.
 
   Intel (Windows only)
    * Library: Win32 Performance Data Helper (PDH).

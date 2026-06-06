@@ -1,14 +1,15 @@
 <div align="center">
 
-<img src="resources/svg/banner.svg" alt="WattSeal, Real-time PC power consumption monitoring" width="100%"/>
+<img src="resources/svg/banner.svg" alt="WattSeal, real-time Linux power monitoring" width="100%"/>
 
-WattSeal shows you a live breakdown of power consumption of your PC, by component and by app. Monitor which hardware is drawing the most energy, which apps are the biggest energy hogs, and how your usage changes over time.
+# WattSeal
 
-Available in English and French.
+Real-time Linux power monitoring for CPUs, GPUs, memory, storage, network, and processes.
 
-[![Windows](https://img.shields.io/badge/Windows-x86__64-0078D4?style=flat-square&logo=windows)](https://github.com/daminoup88/wattseal/releases)
+**This branch keeps the existing quick-install flow and adds AMD GPU telemetry on Linux, with the AMD path built around the open-source Linux `amdgpu`/DRM sysfs interfaces used alongside Mesa RADV rather than AMD-only proprietary tooling.**
+
 [![Linux](https://img.shields.io/badge/Linux-x86__64-FCC624?style=flat-square&logo=linux&logoColor=black)](https://github.com/daminoup88/wattseal/releases)
-[![macOS](https://img.shields.io/badge/macOS-aarch64-000000?style=flat-square&logo=apple)](https://github.com/daminoup88/wattseal/releases)
+[![AMD RDNA 4](https://img.shields.io/badge/AMD_RDNA_4-GFX12-red?style=flat-square)](https://docs.mesa3d.org/drivers/radv.html)
 [![GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue?style=flat-square)](LICENSE)
 
 <img src="resources/dashboard.png" alt="WattSeal app dashboard showing real-time power consumption breakdown by application and component" width="80%" style="border-radius: 12px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); margin-top: 20px;"/>
@@ -17,224 +18,142 @@ Available in English and French.
 
 ---
 
-## Why use WattSeal?
+## Quick install
 
-Most people have no idea how much electricity their computer actually uses, or which apps are silently draining power in the background. WattSeal gives you that visibility:
-
-- 🔍 **Live dashboard**: watch power draw update every second
-- 🧩 **Per-component breakdown**: CPU, GPU, RAM, storage, network
-- 📋 **Per-app breakdown**: find out which processes are costing you the most
-- 📈 **Historical charts**: spot trends over time
-- 💾 **Local database**: all your data stays on your machine, private
-
-> Power readings are validated against real hardware measurements using a [Shelly Plug Gen3 S](https://www.shelly.com/products/shelly-plug-s-gen3) smart plug.
-
----
-
-## Getting Started
-
-### Step 1 — Download
-
-Grab the latest release for your operating system from the **[Releases page](https://github.com/daminoup88/wattseal/releases)**:
-
-| Your system | File to download |
-|---|---|
-| Windows (64-bit) | `WattSeal-windows.exe` |
-| Linux (64-bit) | `WattSeal-linux` |
-| macOS (Apple Silicon) | `WattSeal-macos` |
-
-WattSeal is a single executable file — no installation needed. Just download it, and you're ready for the next step.
-
----
-
-### Step 2 — Run it
-
-WattSeal doesn't need administrative privileges to run, but Windows needs a one-time admin step to install the CPU MSR driver for precise power measurements. If you skip that step, you'll still get power estimates based on CPU usage, but they won't be as accurate.
-
-<details>
-<summary><strong>🪟 Windows</strong></summary>
-
-1. Double-click the downloaded `WattSeal-windows-x86_64.exe` file
-2. If prompted by Windows Defender SmartScreen, click "More info" and then "Run anyway" to launch the app. This is a standard warning for new apps that haven't yet built up reputation on Windows.
-3. If prompted by User Account Control (UAC) to install the CPU MSR driver, click "Yes" to install it (this is a one-time step). If you click "No", WattSeal will still run but CPU power readings will be estimated.
-
-The app will launch in the system tray in the taskbar and the dashboard will open in a new window. If you close the dashboard, WattSeal will keep running in the background and you can reopen it by clicking the tray icon.
-
-</details>
-
-<details>
-<summary><strong>🐧 Linux</strong></summary>
-
-Open a terminal in the folder where you downloaded WattSeal and run:
+Keep using the same Linux executable that was already available:
 
 ```bash
 chmod +x WattSeal-linux
 sudo ./WattSeal-linux
 ```
 
-> **Note:** the only extra runtime dependency is an X11 system tray library.
-> If either `libappindicator` **or** `libayatana-appindicator` is installed
-> the app will show a tray icon with menu items; otherwise WattSeal will
-> simply run in the background without a tray icon (you can still open the
-> dashboard by re‑running the command).
+Why `sudo` is still recommended:
 
-</details>
+- Linux CPU energy counters can require elevated access depending on kernel and distro policy.
+- AMD GPU telemetry is read from `/sys/class/drm/card*/device` and `/sys/class/drm/card*/device/hwmon/hwmon*`; many distros expose those files to normal users, but power files can be restricted by udev rules.
+- NVIDIA telemetry still uses NVML where available.
 
-<details>
-<summary><strong>🍎 macOS</strong></summary>
-
-Run the app normally, WattSeal will work without admin privileges.
-
-</details>
+If you need a desktop launcher, keep using `resources/linux/WattSeal.desktop` and point it at the same `WattSeal-linux` binary.
 
 ---
 
-## What can WattSeal measure?
+## What changed for AMD GPUs on Linux
 
-| Component | How it's measured |
-|---|---|
-| **CPU (Intel / AMD)** | Direct hardware energy counters (RAPL) — very accurate |
-| **GPU (NVIDIA)** | NVML vendor API — very accurate |
-| **GPU (AMD, Windows)** | ADLX vendor API — very accurate |
-| **GPU (Intel, Windows)** | PDH performance counters |
-| **RAM** | Estimated from memory usage |
-| **Disk** | Estimated from read/write activity |
-| **Network** | Estimated from data throughput |
-| **Per-process** | CPU + GPU + I/O breakdown per app |
+WattSeal now detects Linux AMD DRM devices directly from sysfs:
 
-> **What does "estimated" mean?** For components without built-in energy sensors, WattSeal calculates a best-guess power draw based on how hard the hardware is working and its known power specs. It's less precise than hardware counters, but still gives a solid picture.
+- GPU discovery: `/sys/class/drm/card*/device/vendor` with AMD PCI vendor ID `0x1002`.
+- Utilization: `gpu_busy_percent` from the `amdgpu` kernel driver.
+- VRAM usage: `mem_info_vram_used` and `mem_info_vram_total`.
+- Board/GPU power: `hwmon` files such as `power1_average` or `power1_input` when the kernel exposes them.
 
----
+This keeps the Linux AMD path aligned with open-source driver stacks:
 
-## Platform Support
-
-With admin privileges, WattSeal provides the most comprehensive power monitoring experience possible on each platform:
-
-|  | Windows | Linux | macOS |
-|---|:---:|:---:|:---:|
-| Full application | ✅ | ✅ | ✅ |
-| CPU energy counters | ✅ | ✅ | Estimated |
-| NVIDIA GPU | ✅ | ✅ | ❌ |
-| AMD GPU | ✅ | ❌ | ❌ |
-| Intel GPU | ✅ | ❌ | ❌ |
-| Other sensors (usage, I/O) | ✅ | ✅ | ✅ |
-| Auto admin elevation | ✅ UAC (one time) | Manual (`sudo`) | Manual |
-
-<details>
-<summary><strong>Support without admin privileges</strong></summary>
-
-|  | Windows | Linux | macOS |
-|---|:---:|:---:|:---:|
-| Full application | ✅ | ✅ | ✅ |
-| CPU energy counters | ✅ (after driver install) | Estimated | Estimated |
-| NVIDIA GPU | ✅ | ✅ | ❌ |
-| AMD GPU | ✅ | ❌ | ❌ |
-| Intel GPU | ✅ | ❌ | ❌ |
-| Other sensors (usage, I/O) | ✅ | ✅ | ✅ |
-
-</details>
+- Kernel side: DRM + `amdgpu` sysfs/hwmon telemetry.
+- Userspace graphics side: Mesa RADV naming and GFX generation conventions.
+- No ADLX, ROCm, AMDGPU-PRO, or proprietary AMD library is required for this telemetry path.
 
 ---
 
-<br>
+## RDNA 4 / RADV focus
 
-## Troubleshooting
+RDNA 4 support is treated as a first-class Linux target:
 
-**Rendering issues?** If the UI looks broken or fails to launch, try setting the environment variable `ICED_BACKEND=tiny-skia` before running the app. This forces Iced to use a software renderer which is more compatible with older GPUs and VMs.
+| RDNA 4 family | RADV/GFX label used by WattSeal when known | Notes |
+|---|---|---|
+| Navi 44 | `GFX1200 / Navi 44 / RDNA 4` | Includes public RX 9060 XT Linux reports such as PCI ID `1002:7590`. |
+| Navi 48 | `GFX1201 / Navi 48 / RDNA 4` | Grouped by the known Navi 48/RDNA 4 ID range when sysfs does not expose a board marketing name. |
+| Unknown/new RDNA 4 IDs | `AMD Radeon Graphics (RADV, cardN, 1002:xxxx)` | Still detected and monitored through `amdgpu` sysfs if the kernel exposes telemetry. |
 
-# 🛠️ Developer Documentation
-<div align="center">
-
-[![Built with Rust](https://img.shields.io/badge/Built%20With-Rust-CE422B?style=flat-square&logo=rust)](https://www.rust-lang.org)
-[![Built with Iced](https://img.shields.io/badge/Built%20With%20Iced-3645FF?logo=iced&logoColor=fff)]()
-
-</div>
-
-The rest of this README is aimed at contributors and developers who want to build WattSeal from source, understand its architecture, or add new features.
-
-> Want to contribute? Check out our [CONTRIBUTING.md](CONTRIBUTING.md) and our [ROADMAP.md](ROADMAP.md) for planned features and areas where help is needed.
+The app does **not** require the Vulkan RADV driver to be loaded before it can read power/usage telemetry. RADV is used here as the open-source naming and architecture reference point, while the actual readings come from the kernel DRM device.
 
 ---
 
-## Architecture Overview
+## Current sensor support
 
-WattSeal is a Rust workspace made up of three crates:
+| Component | Linux support | Data source |
+|---|---:|---|
+| CPU | ✅ | RAPL/scaphandre path when available, otherwise estimates |
+| AMD GPU | ✅ | Open-source `amdgpu` DRM sysfs + hwmon |
+| AMD RDNA 4 GPU | ✅ | Same AMD path, with RADV/GFX12-friendly labels |
+| NVIDIA GPU | ✅ | NVML |
+| Intel GPU | Planned | Not currently enabled on Linux |
+| RAM | ✅ | Estimated from memory usage |
+| Disk | ✅ | Estimated from read/write activity |
+| Network | ✅ | Estimated from throughput |
+| Per-process | ✅ | CPU, memory, and I/O; NVIDIA process GPU usage when NVML supports it |
 
-```
-wattseal/               ← Root binary (tray icon, lifecycle management)
-  ├── collector/        ← Background sensor polling, power estimation, DB writes
-  ├── common/           ← Shared types, SQLite layer, utilities
-  └── ui/               ← Iced GUI (dashboard, hardware info, settings, charts)
-```
-
-**How the pieces fit together:**
-
-![Architecture diagram](resources/svg/overall_architecture.svg)
-
-The collector and UI share the same SQLite database file via WAL (Write-Ahead Logging) mode, which allows concurrent reads and writes without locking.
-
----
-
-## Prerequisites
-
-- **Rust** stable toolchain (version pinned in [`rust-toolchain.toml`](rust-toolchain.toml)).
-- On linux, install the build deps for the tray icon, not needed at runtime but required to build the Linux version:
-
-  ```bash
-  sudo apt install libgtk-3-dev pkg-config libxkbcommon-dev libwayland-dev
-  ```
+> AMD per-process GPU attribution is not yet available in this branch because the open sysfs path provides device-level telemetry, not per-process GPU engine utilization.
 
 ---
 
-## Building from Source
+## Linux requirements
 
-Clone the repository:
-```bash
-git clone https://github.com/daminoup88/wattseal.git
-```
+Recommended for AMD RDNA 4 systems:
+
+- A recent Linux kernel with RDNA 4 `amdgpu` support enabled.
+- Recent Mesa with RADV support for GFX12/RDNA 4 if you also want Vulkan workloads to run through RADV.
+- `amdgpu` loaded for the GPU you want to monitor.
+- Access to `/sys/class/drm/card*/device/gpu_busy_percent` and any available `hwmon` power files.
+
+Optional runtime dependency:
+
+- An X11 tray library. If either `libappindicator` or `libayatana-appindicator` is installed, WattSeal shows a tray icon with menu items. Without it, WattSeal still runs and the dashboard can be reopened by running the app again.
+
+---
+
+## Troubleshooting AMD GPU detection
+
+### Check that Linux sees the AMD card
 
 ```bash
-cd wattseal
+for card in /sys/class/drm/card*/device; do
+  printf '%s vendor=' "$card"
+  cat "$card/vendor" 2>/dev/null || true
+  printf '%s device=' "$card"
+  cat "$card/device" 2>/dev/null || true
+done
 ```
 
-Debug build and run:
+AMD cards should report vendor `0x1002`.
+
+### Check open `amdgpu` telemetry files
+
 ```bash
-cargo run
+for card in /sys/class/drm/card*/device; do
+  [ "$(cat "$card/vendor" 2>/dev/null)" = "0x1002" ] || continue
+  echo "== $card =="
+  cat "$card/gpu_busy_percent" 2>/dev/null || echo "gpu_busy_percent unavailable"
+  cat "$card/mem_info_vram_used" 2>/dev/null || true
+  cat "$card/mem_info_vram_total" 2>/dev/null || true
+  for hwmon in "$card"/hwmon/hwmon*; do
+    [ -d "$hwmon" ] || continue
+    echo "hwmon: $hwmon ($(cat "$hwmon/name" 2>/dev/null))"
+    cat "$hwmon/power1_average" 2>/dev/null || cat "$hwmon/power1_input" 2>/dev/null || true
+  done
+done
 ```
 
-Release build:
+If the files exist but WattSeal cannot read power as a normal user, run WattSeal with `sudo` or add distro-specific udev permissions for the relevant `hwmon` files.
+
+### The GPU appears but power is blank
+
+Some boards or kernel versions expose utilization and VRAM counters but not instantaneous board power. WattSeal will still report the available usage fields and leave total GPU watts empty rather than fabricating an AMD GPU power estimate.
+
+---
+
+## Development notes
+
+Build the Linux collector/app with Cargo as before:
+
 ```bash
+cargo check
 cargo build --release
 ```
 
-> ⚠️ **Elevated privileges are required** only to install the Windows CPU MSR driver once.
-> Run with administrator rights on Windows (you will be prompted to elevate for driver setup), or use `sudo` on Linux for RAPL access.
+The AMD Linux implementation is intentionally dependency-light. It uses Rust standard-library filesystem reads and existing Linux kernel interfaces so it remains compatible with open Mesa/RADV setups and avoids binding the project to proprietary AMD SDKs.
 
 ---
 
-## Project Layout
+## License
 
-| Path | What it does |
-|---|---|
-| `src/main.rs` | Entry point: admin elevation, tray icon, collector thread, UI subprocess |
-| `collector/` | All sensor implementations (CPU, GPU, RAM, disk, network, per-process) |
-| `common/` | Shared types (`Event`, `SensorData`, …), SQLite database layer, utilities |
-| `ui/` | Iced application: pages, components, charts, themes, translations |
-
----
-
-## Code Style & Quality
-
-The project enforces the formatting and linting rules defined in `rustfmt.toml`. Compliance is checked in CI. You can run the following command locally to ensure your code meets the project's style guidelines before pushing:
-
-```bash
-cargo +nightly fmt
-```
-
-> The `.vscode/settings.json` and `.zed/settings.json` are configured to format on save, so if you're using VS Code or Zed your code will be formatted automatically when you save a file.
-
----
-
-# License
-
-WattSeal is licensed under [GPL-3.0](LICENSE). See the [LICENSE](LICENSE) file for details.
+WattSeal is released under the [GPL-3.0 license](LICENSE).
