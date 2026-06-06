@@ -75,18 +75,25 @@ pub fn get_gpu_list() -> Vec<String> {
     list
 }
 
-/// Returns the list of NVIDIA GPU names via NVML.
+/// Returns the list of NVIDIA and AMD GPU names detected on Linux.
 #[cfg(target_os = "linux")]
 pub fn get_gpu_list() -> Vec<String> {
-    nvml_wrapper::Nvml::init()
-        .and_then(|nvml| {
-            let count = nvml.device_count()?;
-            Ok((0..count)
-                .filter_map(|i| nvml.device_by_index(i).ok())
-                .filter_map(|d| d.name().ok())
-                .collect())
-        })
-        .unwrap_or_default()
+    let mut list: Vec<String> = linux_amd_gpu::list_amd_gpus()
+        .into_iter()
+        .map(|gpu| gpu.display_name())
+        .collect();
+
+    if let Ok(nvml) = nvml_wrapper::Nvml::init() {
+        if let Ok(count) = nvml.device_count() {
+            list.extend(
+                (0..count)
+                    .filter_map(|i| nvml.device_by_index(i).ok())
+                    .filter_map(|d| d.name().ok()),
+            );
+        }
+    }
+
+    list
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -100,6 +107,8 @@ pub enum GPUSensor {
     Nvidia(nvidia_gpu::NvidiaGPUSensor),
     #[cfg(target_os = "windows")]
     Amd(amd_gpu::AmdGPUSensor),
+    #[cfg(target_os = "linux")]
+    Amd(linux_amd_gpu::LinuxAmdGPUSensor),
     #[cfg(target_os = "windows")]
     Intel { sensor: intel_gpu::IntelGPUSensor },
 }
@@ -110,6 +119,8 @@ impl Sensor for GPUSensor {
             #[cfg(any(target_os = "windows", target_os = "linux"))]
             GPUSensor::Nvidia(sensor) => sensor.read_full_data(),
             #[cfg(target_os = "windows")]
+            GPUSensor::Amd(sensor) => sensor.read_full_data(),
+            #[cfg(target_os = "linux")]
             GPUSensor::Amd(sensor) => sensor.read_full_data(),
             #[cfg(target_os = "windows")]
             GPUSensor::Intel { sensor } => sensor.read_full_data(),
@@ -147,6 +158,7 @@ pub fn get_gpu_power_sensor(vendor_id: &str, index: u32) -> Result<SensorType, S
     #[cfg(target_os = "linux")]
     {
         return match vendor {
+            GPUVendor::Amd => linux_amd_gpu::LinuxAmdGPUSensor::new(index).map(|s| SensorType::GPU(GPUSensor::Amd(s))),
             GPUVendor::Nvidia => nvidia_gpu::NvidiaGPUSensor::new(index).map(|s| SensorType::GPU(GPUSensor::Nvidia(s))),
             _ => Err(SensorError::NotSupported),
         };
@@ -167,6 +179,8 @@ impl GPUSensor {
             GPUSensor::Nvidia(sensor) => sensor.get_processes_gpu_usage(current_timestamp),
             #[cfg(target_os = "windows")]
             GPUSensor::Amd(_) | GPUSensor::Intel { .. } => Err(SensorError::NotSupported),
+            #[cfg(target_os = "linux")]
+            GPUSensor::Amd(_) => Err(SensorError::NotSupported),
             #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             _ => Err(SensorError::NotSupported),
         }
@@ -178,6 +192,188 @@ impl GPUSensor {
             #[cfg(target_os = "windows")]
             GPUSensor::Intel { .. } => true,
             _ => false,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux_amd_gpu {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    use super::{Sensor, SensorError};
+    use crate::database::{GPUData, SensorData};
+
+    const AMD_PCI_VENDOR_ID: &str = "0x1002";
+
+    #[derive(Clone, Debug)]
+    pub struct LinuxAmdGpuDevice {
+        card: String,
+        device_path: PathBuf,
+        device_id: Option<String>,
+        marketing_name: Option<String>,
+    }
+
+    impl LinuxAmdGpuDevice {
+        pub fn display_name(&self) -> String {
+            let architecture = self
+                .device_id
+                .as_deref()
+                .and_then(radv_architecture_name)
+                .map(|name| format!(" / {name}"))
+                .unwrap_or_default();
+            let pci_id = self
+                .device_id
+                .as_deref()
+                .map(|id| format!("1002:{id}"))
+                .unwrap_or_else(|| "1002:unknown".to_string());
+            let marketing_name = self.marketing_name.as_deref().unwrap_or("AMD Radeon Graphics");
+            let vendor_name = if marketing_name.to_ascii_lowercase().contains("amd") {
+                marketing_name.to_string()
+            } else {
+                format!("AMD {marketing_name}")
+            };
+
+            format!("{vendor_name} (RADV{architecture}, {}, {pci_id})", self.card)
+        }
+    }
+
+    pub struct LinuxAmdGPUSensor {
+        device: LinuxAmdGpuDevice,
+    }
+
+    impl LinuxAmdGPUSensor {
+        pub fn new(index: u32) -> Result<Self, SensorError> {
+            let devices = list_amd_gpus();
+            let device = devices
+                .get(index as usize)
+                .cloned()
+                .ok_or_else(|| SensorError::ReadError(format!("No AMD GPU found at Linux DRM index {index}")))?;
+
+            Ok(LinuxAmdGPUSensor { device })
+        }
+    }
+
+    impl Sensor for LinuxAmdGPUSensor {
+        fn read_full_data(&self) -> Result<SensorData, SensorError> {
+            let usage_percent = read_f64_file(self.device.device_path.join("gpu_busy_percent"));
+            let vram_usage_percent = read_vram_usage_percent(&self.device.device_path);
+            let total_power_watts = read_power_watts(&self.device.device_path);
+
+            if usage_percent.is_none() && vram_usage_percent.is_none() && total_power_watts.is_none() {
+                return Err(SensorError::ReadError(format!(
+                    "amdgpu sysfs telemetry unavailable for {}",
+                    self.device.display_name()
+                )));
+            }
+
+            Ok(GPUData {
+                total_power_watts,
+                usage_percent,
+                vram_usage_percent,
+            }
+            .into())
+        }
+    }
+
+    pub fn list_amd_gpus() -> Vec<LinuxAmdGpuDevice> {
+        let mut devices: Vec<LinuxAmdGpuDevice> = fs::read_dir("/sys/class/drm")
+            .ok()
+            .into_iter()
+            .flat_map(|entries| entries.filter_map(Result::ok))
+            .filter_map(|entry| {
+                let card = entry.file_name().to_string_lossy().into_owned();
+                if !is_primary_drm_card(&card) {
+                    return None;
+                }
+
+                let drm_path = entry.path();
+                let device_path = drm_path.join("device");
+                let vendor = read_trimmed(device_path.join("vendor"))?;
+                if !vendor.eq_ignore_ascii_case(AMD_PCI_VENDOR_ID) {
+                    return None;
+                }
+
+                Some(LinuxAmdGpuDevice {
+                    card,
+                    device_id: read_trimmed(device_path.join("device")).map(|id| normalize_hex_id(&id)),
+                    marketing_name: read_marketing_name(&device_path),
+                    device_path,
+                })
+            })
+            .collect();
+
+        devices.sort_by(|a, b| a.card.cmp(&b.card));
+        devices
+    }
+
+    fn is_primary_drm_card(name: &str) -> bool {
+        name.strip_prefix("card")
+            .is_some_and(|suffix| !suffix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()))
+    }
+
+    fn read_marketing_name(device_path: &Path) -> Option<String> {
+        for candidate in ["product_name", "product", "model"] {
+            if let Some(value) = read_trimmed(device_path.join(candidate)) {
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+        None
+    }
+
+    fn read_power_watts(device_path: &Path) -> Option<f64> {
+        let hwmon_dir = fs::read_dir(device_path.join("hwmon")).ok()?;
+        for entry in hwmon_dir.filter_map(Result::ok) {
+            let hwmon_path = entry.path();
+            let name = read_trimmed(hwmon_path.join("name")).unwrap_or_default();
+            if !name.eq_ignore_ascii_case("amdgpu") {
+                continue;
+            }
+
+            for candidate in ["power1_average", "power1_input"] {
+                if let Some(microwatts) = read_f64_file(hwmon_path.join(candidate)) {
+                    return Some((microwatts / 1_000_000.0).max(0.0));
+                }
+            }
+        }
+
+        None
+    }
+
+    fn read_vram_usage_percent(device_path: &Path) -> Option<f64> {
+        let used = read_f64_file(device_path.join("mem_info_vram_used"))?;
+        let total = read_f64_file(device_path.join("mem_info_vram_total"))?;
+        (total > 0.0).then_some((used / total * 100.0).clamp(0.0, 100.0))
+    }
+
+    fn read_f64_file(path: impl AsRef<Path>) -> Option<f64> {
+        read_trimmed(path)?.parse::<f64>().ok()
+    }
+
+    fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+        fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    }
+
+    fn normalize_hex_id(id: &str) -> String {
+        id.trim_start_matches("0x")
+            .trim_start_matches("0X")
+            .to_ascii_lowercase()
+    }
+
+    fn radv_architecture_name(device_id: &str) -> Option<&'static str> {
+        match device_id {
+            // Mesa/RADV exposes RDNA 4 as GFX12.  Public Linux reports for
+            // Radeon RX 9060 XT show Navi 44 as GFX1200 with PCI ID 1002:7590.
+            "7590" => Some("GFX1200 / Navi 44 / RDNA 4"),
+            // Keep Navi 48 grouped by architecture even when a board's exact
+            // marketing name is unavailable from sysfs.
+            "7550" | "7551" | "7552" | "7553" | "7554" | "7555" | "7556" | "7557" | "7558" | "7559" | "755a"
+            | "755b" | "755c" | "755d" | "755e" | "755f" => Some("GFX1201 / Navi 48 / RDNA 4"),
+            _ => None,
         }
     }
 }
